@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>预约助手</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <h1>讲座预约配置</h1>
+      <div class="timestamp-badge">NO.1024</div>
+    </header>
+
+    <main class="app-content">
+      <!-- Decoration Stamp -->
+      <svg class="icon-stamp" viewBox="0 0 24 24" fill="currentColor">
+        <path
+          d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" />
+      </svg>
+
+      <section class="note-group">
+        <div class="section-title">验证码配置 (SuperEagle)</div>
+
+        <div class="input-row">
+          <label class="input-label" for="captchaUser">用户</label>
+          <input id="captchaUser" type="text" class="input-field" placeholder="Username" />
+        </div>
+
+        <div class="input-row">
+          <label class="input-label" for="captchaPass">密码</label>
+          <input id="captchaPass" type="password" class="input-field" placeholder="******" />
+        </div>
+
+        <div class="input-row">
+          <label class="input-label" for="captchaSoftid">Soft ID</label>
+          <input id="captchaSoftid" type="text" class="input-field" placeholder="SoftID" />
+        </div>
+        <div class="input-row">
+          <label class="input-label" for="captchaCodetype">类型</label>
+          <input id="captchaCodetype" type="number" class="input-field" placeholder="1902" />
+        </div>
+      </section>
+
+      <section class="note-group">
+        <div class="section-title">重试策略</div>
+        <div class="grid-2">
+          <div class="input-row">
+            <label class="input-label" for="retryIntervalMs">间隔</label>
+            <input id="retryIntervalMs" type="number" class="input-field" placeholder="ms" />
+          </div>
+          <div class="input-row">
+            <label class="input-label" for="retryMaxAttempts">次数</label>
+            <input id="retryMaxAttempts" type="number" class="input-field" placeholder="Max" />
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <div id="settingsStatus" class="status-area"></div>
+      <div class="action-bar">
+        <button id="resetRecommended" class="btn-paper">重置</button>
+        <button id="saveSettings" class="btn-paper primary">保存配置</button>
+      </div>
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+
+</html>

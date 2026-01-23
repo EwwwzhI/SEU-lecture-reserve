@@ -1,0 +1,283 @@
+/*
+ * SEU Lecture Reservation - Paper & Texture Design
+ * Aesthetic: Physical Note / Journal / Stationery
+ */
+
+/* ========== Google Fonts ========== */
+/* 'Noto Serif SC' for elegant Chinese serif, 'Patrick Hand' for handwritten English feel if needed, or clear Sans */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Nunito:wght@400;600;700&display=swap');
+
+/* ========== CSS Variables ========== */
+:root {
+  /* Paper Colors */
+  --paper-bg: #fdfbf7;
+  /* Warm white paper */
+  --paper-texture: url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPgo8cmVjdCB3aWR0aD0iNCIgaGVpZ2h0PSI0IiBmaWxsPSIjZmRmYmY3Ii8+CjxyZWN0IHdpZHRoPSIxIiBoZWlnaHQ9IjEiIGZpbGw9InJnYmEoMCwwLDAsMC4wMikiLz4KPC9zdmc+');
+  --paper-border: #e6e3dd;
+
+  /* Ink Colors */
+  --ink-primary: #2c3e50;
+  /* Dark Blue-Grey Ink */
+  --ink-secondary: #5d6d7e;
+  /* Faded Ink */
+  --ink-accent: #c0392b;
+  /* Red Stamp Ink */
+
+  /* Highlighter/Sticker Colors */
+  --tag-blue: #d6eaf8;
+  --tag-blue-text: #2874a6;
+  --tag-yellow: #fcf3cf;
+  --tag-yellow-text: #b7950b;
+  --tag-green: #d5f5e3;
+  --tag-green-text: #1e8449;
+
+  /* Shadows */
+  --shadow-paper-sm: 0 1px 2px rgba(44, 62, 80, 0.1);
+  --shadow-paper-md: 0 4px 6px rgba(44, 62, 80, 0.08), 0 1px 3px rgba(44, 62, 80, 0.05);
+  --shadow-lifted: 0 10px 15px -3px rgba(44, 62, 80, 0.1), 0 4px 6px -2px rgba(44, 62, 80, 0.05);
+
+  /* Typography */
+  --font-serif: 'Noto Serif SC', serif;
+  --font-sans: 'Nunito', sans-serif;
+
+  /* UI Elements */
+  --radius-paper: 2px;
+  /* Sharp corners for paper feel */
+  --line-rule: 1px dashed #d6dbdf;
+}
+
+/* ========== Base Styles ========== */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  background-color: #f0f2f5;
+  /* Desk surface color */
+  background-image: radial-gradient(#e1e4e8 1px, transparent 1px);
+  background-size: 20px 20px;
+  color: var(--ink-primary);
+  font-size: 14px;
+  width: 400px;
+  min-height: 440px;
+  overflow-x: hidden;
+}
+
+/* ========== Main Note Container ========== */
+.app-container {
+  margin: 16px;
+  background-color: var(--paper-bg);
+  background-image: var(--paper-texture);
+  border: 1px solid var(--paper-border);
+  box-shadow: var(--shadow-lifted);
+  position: relative;
+  min-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+/* Top colored band (like a notebook header) */
+.app-container::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: repeating-linear-gradient(45deg,
+      #aab7b8,
+      #aab7b8 10px,
+      #99a3a4 10px,
+      #99a3a4 20px);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+/* ========== Header "Title Block" ========== */
+.app-header {
+  padding: 24px 20px 16px;
+  border-bottom: 2px solid var(--ink-primary);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.app-header h1 {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--ink-primary);
+  letter-spacing: 0.05em;
+}
+
+.timestamp-badge {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: var(--ink-secondary);
+  border: 1px solid var(--ink-secondary);
+  padding: 2px 6px;
+  border-radius: 2px;
+  opacity: 0.8;
+}
+
+/* ========== Content Area ========== */
+.app-content {
+  padding: 20px;
+}
+
+/* ========== Handwriting/Section Style ========== */
+.section-title {
+  font-family: var(--font-serif);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-primary);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title::before {
+  content: '';
+  display: block;
+  width: 4px;
+  height: 14px;
+  background-color: var(--ink-accent);
+}
+
+/* ========== Form Fields (Underlined Style) ========== */
+.note-group {
+  margin-bottom: 16px;
+}
+
+.input-row {
+  display: flex;
+  flex-direction: column;
+  /* Stacked labels for better space utilization */
+  margin-bottom: 10px;
+  gap: 2px;
+}
+
+.input-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.input-field {
+  width: 100%;
+  /* Ensure full width */
+  border: none;
+  background: rgba(0, 0, 0, 0.02);
+  border-bottom: 1.5px solid var(--paper-border);
+  padding: 6px 4px;
+  font-family: 'Fira Code', 'Courier New', monospace;
+  font-size: 14px;
+  color: var(--ink-primary);
+  transition: all 0.2s;
+}
+
+.input-field:focus {
+  outline: none;
+  border-bottom: 1px solid var(--ink-primary);
+  background-color: rgba(0, 0, 0, 0.02);
+}
+
+.input-field::placeholder {
+  color: #bdc3c7;
+  font-style: italic;
+  font-family: var(--font-sans);
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ========== Buttons (Stamp Style) ========== */
+.app-footer {
+  padding: 8px 20px 16px;
+  background-image: linear-gradient(to bottom, rgba(255, 255, 255, 0), rgba(0, 0, 0, 0.02));
+  border-top: 1px dashed #d6dbdf;
+  margin-top: -5px;
+  /* Pull footer closer */
+  background-color: transparent;
+}
+
+.status-area {
+  min-height: 24px;
+  margin-bottom: 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--ink-accent);
+  text-align: center;
+}
+
+.action-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.btn-paper {
+  background: transparent;
+  border: 2px solid var(--ink-primary);
+  color: var(--ink-primary);
+  padding: 8px 16px;
+  font-family: var(--font-serif);
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 4px;
+  /* Slightly rounded rough edges */
+  transition: all 0.15s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.btn-paper:hover {
+  transform: translateY(-1px) rotate(-1deg);
+  box-shadow: 2px 2px 0 var(--ink-secondary);
+}
+
+.btn-paper:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+.btn-paper.primary {
+  background-color: var(--ink-primary);
+  color: var(--paper-bg);
+  border-color: var(--ink-primary);
+}
+
+.btn-paper.primary:hover {
+  background-color: #34495e;
+  box-shadow: 2px 2px 0 rgba(44, 62, 80, 0.3);
+}
+
+/* ========== Icon Decorations ========== */
+.icon-stamp {
+  opacity: 0.05;
+  /* Faded even more to act as watermark */
+  position: absolute;
+  right: 15px;
+  bottom: 15px;
+  /* Moved to far bottom corner */
+  width: 120px;
+  height: 120px;
+  pointer-events: none;
+  transform: rotate(-15deg);
+  z-index: 0;
+  /* Behind everything */
+}
+
+/* Input type number adjustments */
+input[type=number]::-webkit-inner-spin-button {
+  opacity: 0.5;
+}

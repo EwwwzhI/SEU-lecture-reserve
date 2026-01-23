@@ -1,0 +1,36 @@
+﻿{
+  "manifest_version": 3,
+  "name": "东南大学讲座预约",
+  "version": "0.1.0",
+  "description": "东南大学讲座预约：定时自动预约并支持验证码识别。",
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://ehall.seu.edu.cn/*",
+    "http://upload.chaojiying.net/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ehall.seu.edu.cn/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "东南大学讲座预约",
+    "default_popup": "popup.html"
+  }
+}
