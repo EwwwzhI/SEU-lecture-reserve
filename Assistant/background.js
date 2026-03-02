@@ -19,6 +19,94 @@ const API_PATHS = {
   reserve: "/gsapp/sys/yddjzxxtjappseu/modules/hdyy/addReservation.do"
 };
 
+const detectedLecturesByTab = Object.create(null);
+const DETECTED_LECTURE_TTL_MS = 2 * 60 * 1000;
+
+function normalizeDetectedLecture(item) {
+  if (!item || typeof item !== "object") return null;
+  const wid = String(item.wid || "").trim();
+  const id = String(item.id || "").trim();
+  if (!wid && !id) return null;
+  return {
+    id: id || (wid ? `wid:${wid}` : ""),
+    wid,
+    title: String(item.title || "").trim(),
+    timeStr: String(item.timeStr || "").trim(),
+    statusText: String(item.statusText || "").trim()
+  };
+}
+
+function pruneDetectedLectures(tabId) {
+  const bucket = detectedLecturesByTab[tabId];
+  if (!bucket) return;
+  const now = Date.now();
+  for (const frameKey of Object.keys(bucket)) {
+    const entry = bucket[frameKey];
+    if (!entry || now - Number(entry.updatedAt || 0) > DETECTED_LECTURE_TTL_MS) {
+      delete bucket[frameKey];
+    }
+  }
+  if (Object.keys(bucket).length === 0) delete detectedLecturesByTab[tabId];
+}
+
+function listDetectedLecturesForTab(tabId) {
+  pruneDetectedLectures(tabId);
+  const bucket = detectedLecturesByTab[tabId] || {};
+  const merged = new Map();
+
+  for (const entry of Object.values(bucket)) {
+    const lectures = Array.isArray(entry && entry.lectures) ? entry.lectures : [];
+    for (const raw of lectures) {
+      const item = normalizeDetectedLecture(raw);
+      if (!item) continue;
+      const key = item.wid || item.id;
+      if (!key) continue;
+      if (!merged.has(key)) merged.set(key, item);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function normalizeTitleForMatch(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[【】[\]()（）"'`.,，。!！?？:：;；\-—_]/g, "");
+}
+
+function titleLooksMatched(a, b) {
+  const x = normalizeTitleForMatch(a);
+  const y = normalizeTitleForMatch(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return x.includes(y) || y.includes(x);
+}
+
+function resolveWidForTask(task) {
+  if (!task) return "";
+  const existingWid = String(task.wid || "").trim();
+  if (existingWid) return existingWid;
+
+  const tabCandidates = [];
+  const sourceTabId = Number(task.sourceTabId);
+  if (Number.isFinite(sourceTabId)) tabCandidates.push(sourceTabId);
+  for (const key of Object.keys(detectedLecturesByTab)) {
+    const id = Number(key);
+    if (!Number.isFinite(id)) continue;
+    if (!tabCandidates.includes(id)) tabCandidates.push(id);
+  }
+
+  for (const tabId of tabCandidates) {
+    const lectures = listDetectedLecturesForTab(tabId);
+    for (const lecture of lectures) {
+      const wid = String((lecture && lecture.wid) || "").trim();
+      if (!wid) continue;
+      if (titleLooksMatched(task.title, lecture.title)) return wid;
+    }
+  }
+  return "";
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -248,7 +336,7 @@ async function reserveLecture(wid, vcode, _settings) {
   return { res, ...info };
 }
 
-async function attemptReserveLoop(taskId, wid) {
+async function attemptReserveLoop(taskId, initialWid) {
   const intervalMs = Math.max(100, Number(settings.retryIntervalMs || 1000));
   const jitterMs = Math.max(0, Number(settings.retryJitterMs || 0));
   const maxAttempts = Math.max(1, Number(settings.retryMaxAttempts || 1));
@@ -257,6 +345,7 @@ async function attemptReserveLoop(taskId, wid) {
   const captchaCooldownBaseMs = Math.max(600, Math.floor(intervalMs * 1.2));
   let consecutiveFail = 0;
   let captchaFail = 0;
+  let runtimeWid = String(initialWid || "").trim();
 
   if (!isCaptchaConfigured(settings)) {
     return { status: "failed", msg: "captcha_not_configured" };
@@ -266,6 +355,18 @@ async function attemptReserveLoop(taskId, wid) {
     const task = (await getTasksMap())[taskId];
     if (!task || task.status === "cancelled") {
       return { status: "cancelled" };
+    }
+
+    runtimeWid = String(task.wid || runtimeWid || "").trim();
+    if (!runtimeWid) {
+      const resolved = resolveWidForTask(task);
+      if (resolved) {
+        runtimeWid = resolved;
+        await updateTask(taskId, { wid: resolved, lastResult: "wid_resolved" });
+      } else {
+        await delayWithJitter(intervalMs, jitterMs);
+        continue;
+      }
     }
 
     try {
@@ -286,7 +387,7 @@ async function attemptReserveLoop(taskId, wid) {
         continue;
       }
 
-      const { success, full, needLogin, invalidVcode, msg } = await reserveLecture(wid, vcode, settings);
+      const { success, full, needLogin, invalidVcode, msg } = await reserveLecture(runtimeWid, vcode, settings);
       if (success) return { status: "success", msg };
       if (full) return { status: "full", msg };
       if (needLogin) return { status: "failed", msg: msg || "login_required" };
@@ -305,7 +406,7 @@ async function attemptReserveLoop(taskId, wid) {
     await delayWithJitter(intervalMs, jitterMs);
   }
 
-  return { status: "failed", msg: "max_attempts" };
+  return { status: "failed", msg: runtimeWid ? "max_attempts" : "wid_not_found" };
 }
 
 async function runTask(taskId) {
@@ -316,17 +417,22 @@ async function runTask(taskId) {
   settings = await getSettings();
   settingsReady = Promise.resolve(settings);
 
-  if (!task.wid) {
-    await updateTask(taskId, { status: "failed", finishedAt: Date.now(), lastResult: "missing_wid" });
-    return;
-  }
   if (!isCaptchaConfigured(settings)) {
     await updateTask(taskId, { status: "failed", finishedAt: Date.now(), lastResult: "captcha_not_configured" });
     return;
   }
 
+  let startWid = String(task.wid || "").trim();
+  if (!startWid) {
+    const resolved = resolveWidForTask(task);
+    if (resolved) {
+      startWid = resolved;
+      await updateTask(taskId, { wid: resolved, lastResult: "wid_resolved" });
+    }
+  }
+
   await updateTask(taskId, { status: "running", startedAt: Date.now() });
-  const result = await attemptReserveLoop(taskId, task.wid);
+  const result = await attemptReserveLoop(taskId, startWid);
 
   if (result.status === "cancelled") {
     await updateTask(taskId, { status: "cancelled", finishedAt: Date.now() });
@@ -348,11 +454,47 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onInstalled.addListener(() => rebuildAlarms());
 chrome.runtime.onStartup.addListener(() => rebuildAlarms());
+if (chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    delete detectedLecturesByTab[tabId];
+  });
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (!msg || !msg.type) {
       sendResponse({ ok: false, error: "invalid_message" });
+      return;
+    }
+
+    if (msg.type === "reportDetectedLectures") {
+      const tabId = sender && sender.tab ? sender.tab.id : null;
+      const frameId = sender && Number.isFinite(sender.frameId) ? sender.frameId : 0;
+      if (tabId == null) {
+        sendResponse({ ok: false, error: "missing_tab" });
+        return;
+      }
+
+      const lectures = Array.isArray(msg.lectures)
+        ? msg.lectures.map(normalizeDetectedLecture).filter(Boolean).slice(0, 300)
+        : [];
+
+      if (!detectedLecturesByTab[tabId]) detectedLecturesByTab[tabId] = Object.create(null);
+      detectedLecturesByTab[tabId][String(frameId)] = {
+        updatedAt: Date.now(),
+        lectures
+      };
+      sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === "listDetectedLectures") {
+      const tabId = sender && sender.tab ? sender.tab.id : null;
+      if (tabId == null) {
+        sendResponse({ ok: true, lectures: [] });
+        return;
+      }
+      sendResponse({ ok: true, lectures: listDetectedLecturesForTab(tabId) });
       return;
     }
 
@@ -383,11 +525,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === "createTask") {
       const now = Date.now();
+      const sourceTabId = sender && sender.tab ? sender.tab.id : null;
       const task = {
         id: `t_${now}_${Math.random().toString(36).slice(2, 8)}`,
-        wid: msg.wid,
+        wid: String(msg.wid || "").trim(),
         title: msg.title || "",
         scheduledAt: msg.scheduledAt || now,
+        reserveStartStr: String(msg.reserveStartStr || "").trim(),
+        sourceTabId: Number.isFinite(sourceTabId) ? sourceTabId : null,
+        preSchedule: Boolean(msg.preSchedule),
         status: "scheduled",
         createdAt: now,
         updatedAt: now

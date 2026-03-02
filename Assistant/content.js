@@ -1,6 +1,13 @@
-(() => {
+﻿(() => {
   if (window.__seuLectureReserveInjected) return;
   window.__seuLectureReserveInjected = true;
+  const isTopWindow = (() => {
+    try {
+      return window.top === window.self;
+    } catch (err) {
+      return true;
+    }
+  })();
 
   const style = document.createElement("style");
   style.textContent = `
@@ -354,6 +361,10 @@
   dock.appendChild(notebook);
   document.body.appendChild(handle);
   document.body.appendChild(dock);
+  if (!isTopWindow) {
+    handle.style.display = "none";
+    dock.style.display = "none";
+  }
 
   let isOpen = false;
   let refreshTimer = null;
@@ -449,7 +460,7 @@
 
     const lectureItems = document.querySelectorAll('div.bh-mb-16');
     if (lectureItems.length === 0) {
-      detectedListEl.innerHTML = '<p style="font-size:12px; color:#5a4c34; text-align:center;">当前页面似乎没有可预约的讲座。</p>';
+      detectedListEl.innerHTML = '<p style="font-size:12px; color:#5a4c34; text-align:center;">当前页面似乎没有可预约的活动。</p>';
       return;
     }
 
@@ -477,7 +488,7 @@
         lectureEl.innerHTML = `
           <div class="seu-reserve-lecture-title"></div>
           <div class="seu-reserve-lecture-inputs">
-            <input class="seu-reserve-input time-input" placeholder="YYYY-MM-DD HH:MM:SS" />
+            <input class="seu-reserve-input time-input" placeholder="预约时间 YYYY-MM-DD HH:MM:SS" />
             <button class="seu-reserve-btn primary schedule-btn">预约</button>
           </div>
         `;
@@ -530,8 +541,544 @@
     });
 
     if (detectedListEl.children.length === 0) {
-      detectedListEl.innerHTML = '<p style="font-size:12px; color:#5a4c34; text-align:center;">当前页面似乎没有可预约的讲座。</p>';
+      detectedListEl.innerHTML = '<p style="font-size:12px; color:#5a4c34; text-align:center;">当前页面似乎没有可预约的活动。</p>';
     }
+  };
+
+  const LECTURE_SEED_SELECTOR = 'div.bh-mb-16, [data-wid], [wid], a[href*="WID="], a[href*="wid="], [onclick*="WID"], [onclick*="wid"], [data-href*="WID"], [data-url*="WID"], .mint-text.ydd-text-overflow.mt-color-default[title], [class*="ydd-text-overflow"][title], [title*="【"]';
+
+  const normalizeLectureText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const pad2 = (value) => String(value).padStart(2, "0");
+  const decodeMaybeUri = (value) => {
+    const text = String(value || "");
+    if (!text) return "";
+    try {
+      return decodeURIComponent(text);
+    } catch (err) {
+      return text;
+    }
+  };
+
+  const parseDateTimeText = (text) => {
+    const source = normalizeLectureText(text);
+    const match = source.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+|\/)(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (!match) return "";
+    const [, y, m, d, hh, mm, ss] = match;
+    return `${y}-${pad2(m)}-${pad2(d)} ${pad2(hh)}:${pad2(mm)}:${pad2(ss || "00")}`;
+  };
+
+  const parseReserveStartText = (text) => {
+    const source = normalizeLectureText(text);
+    if (!source) return "";
+    const hit = source.match(/(?:预约起止时间|预约时间|报名时间)\s*[:：]?\s*([0-9]{4}[-/.][0-9]{1,2}[-/.][0-9]{1,2}(?:\s+|\/)[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)/);
+    if (hit && hit[1]) return parseDateTimeText(hit[1]);
+    return parseDateTimeText(source);
+  };
+
+  const extractWidFromRaw = (raw) => {
+    const rawText = String(raw || "");
+    if (!rawText) return null;
+    const candidates = [rawText, decodeMaybeUri(rawText)];
+    const patterns = [
+      /(?:\?|&|#)(?:WID|wid)=([^&#"'`\s]+)/i,
+      /(?:%3F|%26)(?:WID|wid)(?:=|%3D)([^&#"'`\s%]+)/i,
+      /["'`](?:WID|wid)["'`]\s*:\s*["'`]([^"'`]+)["'`]/i,
+      /(?:^|[{"'`\s,;])(?:WID|wid)\s*[:=]\s*["'`]?([A-Za-z0-9._:-]{4,})/i,
+      /\/(?:WID|wid)\/([^/?#"'`\s]+)/i
+    ];
+    for (const text of candidates) {
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (!match || !match[1]) continue;
+        const cleaned = decodeMaybeUri(match[1]).replace(/["'`,;)}\]]+$/g, "").trim();
+        if (cleaned && !/^WID$/i.test(cleaned)) return cleaned;
+      }
+    }
+    return null;
+  };
+
+  const extractWidFromNodeDeep = (root) => {
+    if (!root || !root.querySelectorAll) return null;
+    const queue = [root, ...Array.from(root.querySelectorAll("*")).slice(0, 300)];
+    for (const node of queue) {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+      const direct = extractWidFromElement(node);
+      if (direct) return direct;
+
+      if (node.attributes) {
+        for (const attr of Array.from(node.attributes)) {
+          const value = `${attr.name || ""}=${attr.value || ""}`;
+          const wid = extractWidFromRaw(value);
+          if (wid) return wid;
+        }
+      }
+
+      const textWid = extractWidFromRaw(node.textContent);
+      if (textWid) return textWid;
+    }
+    const htmlWid = extractWidFromRaw(root.innerHTML || "");
+    if (htmlWid) return htmlWid;
+    return null;
+  };
+
+  const extractWidFromElement = (element) => {
+    if (!element) return null;
+    const attrs = ["data-wid", "wid", "href", "onclick", "data-url", "data-href", "data-link", "value"];
+    for (const attr of attrs) {
+      const wid = extractWidFromRaw(element.getAttribute && element.getAttribute(attr));
+      if (wid) return wid;
+    }
+    if (element.dataset) {
+      for (const value of Object.values(element.dataset)) {
+        const wid = extractWidFromRaw(value);
+        if (wid) return wid;
+      }
+    }
+    return null;
+  };
+
+  const collectAccessibleRoots = () => {
+    const roots = [document];
+    for (const frameEl of Array.from(document.querySelectorAll("iframe, frame"))) {
+      try {
+        const subDoc = frameEl.contentDocument;
+        if (subDoc && subDoc.documentElement) roots.push(subDoc);
+      } catch (err) {
+        // Ignore cross-origin frames.
+      }
+    }
+    return roots;
+  };
+
+  const querySeedsDeep = (root, selector) => {
+    const out = [];
+    const stack = [root];
+    const visited = new Set();
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || visited.has(node) || !node.querySelectorAll) continue;
+      visited.add(node);
+      out.push(...Array.from(node.querySelectorAll(selector)));
+      const hosts = node.querySelectorAll("*");
+      for (const host of hosts) {
+        if (host && host.shadowRoot) stack.push(host.shadowRoot);
+      }
+    }
+    return out;
+  };
+
+  const collectLecturesFromLocalPage = () => {
+    const statusWordRe = /(?:\u672A\u5F00\u653E|\u5F85\u5F00\u653E|\u5DF2\u5F00\u653E|\u53EF\u9884\u7EA6|\u9884\u7EA6\u4E2D|\u5DF2\u6EE1|\u5DF2\u7ED3\u675F|\u672A\u5F00\u59CB|\u5DF2\u9884\u7EA6|\u9884\u7EA6|\u62A5\u540D|\u8FDB\u884C\u4E2D|\u5F00\u653E|\u622A\u6B62|reserve|signup|registration|open|full|closed|available|unavailable)/i;
+    const titleBanRe = /^(?:\u672A\u5F00\u653E|\u5DF2\u6EE1|\u5DF2\u7ED3\u675F|\u9884\u7EA6|\u62A5\u540D|\u8FDB\u884C\u4E2D|\u5F00\u653E|\u5DF2\u9884\u7EA6|\u622A\u6B62|reserve|signup|registration|open|full|closed|available|unavailable)$/i;
+    const lectureHintRe = /(?:\u8BB2\u5EA7|\u62A5\u544A|\u5B66\u672F|\u8BBA\u575B|\u6C99\u9F99|\u5BA3\u8BB2|\u5927\u8BB2\u5802|lecture|seminar|colloquium|symposium)/i;
+    const cultureEventRe = /(?:\u827A\u672F|\u821E\u5267|\u8BDD\u5267|\u97F3\u4E50\u4F1A|\u89C1\u9762\u4F1A|\u6F14\u51FA|\u5C55\u6F14|\u4E00[\u201C\"']?\u5267[\u201D\"']?\u949F\u60C5|\u7EFF\u8272\u901A\u9053|\u5E38\u89C4\u901A\u9053|\u7EBF\u4E0B)/i;
+    const excludeTitleRe = /(?:\u9009\u542C\u7814\u7A76\u751F\u4EBA\u6587\u4E0E\u79D1\u5B66\u7D20\u517B\u7CFB\u5217\u8BB2\u5EA7)/i;
+    const nonLectureRe = /(?:\u4F53\u80B2|\u7FBD\u6BDB\u7403|\u7BEE\u7403|\u8DB3\u7403|\u4E52\u4E53\u7403|\u6E38\u6CF3|\u5065\u8EAB|\u573A\u9986|\u7403\u573A|\u573A\u5730|\u793E\u56E2|\u5FD7\u613F|\u7ADE\u8D5B|\u8DEF\u6F14|\u7968\u52A1|movie|sport|gym|stadium|court)/i;
+    const pageUrl = String((window.location && window.location.href) || "");
+    const isYddjPage = /\/yddjzxxtjappseu\//i.test(pageUrl);
+    const routeHash = String((window.location && window.location.hash) || "");
+    const isHdyyRoute = /^#\/hdyy(?:$|[/?])/i.test(routeHash);
+    const hasActionNode = (node) => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+      const actionSel = "button, a[href], [onclick], [role='button'], [data-action]";
+      try {
+        if (node.matches && node.matches(actionSel)) return true;
+      } catch (err) {}
+      return Boolean(node.querySelector && node.querySelector(actionSel));
+    };
+
+    const isLikelyLecture = (title, scopeText, hasWid, context = {}) => {
+      const text = normalizeLectureText(`${title || ""} ${scopeText || ""}`);
+      if (!text) return false;
+      if (excludeTitleRe.test(text)) return false;
+      if (nonLectureRe.test(text)) return false;
+      const hasLectureWord = lectureHintRe.test(text);
+      const hasCultureWord = cultureEventRe.test(text);
+      const hasStatus = statusWordRe.test(text);
+      const hasAction = Boolean(context.hasAction);
+      const hasDateTime = Boolean(context.hasDateTime);
+      const hasTagTitle = /【[^】]{1,12}】/.test(text);
+
+      if (!isYddjPage || !isHdyyRoute) return false;
+      if (hasLectureWord) return true;
+      if (hasCultureWord && (hasTagTitle || hasLectureWord || hasAction || hasStatus || hasDateTime)) return true;
+      if (hasTagTitle && (hasCultureWord || hasLectureWord)) return true;
+      if (hasTagTitle && (hasAction || hasStatus || hasDateTime)) return true;
+      if (hasWid && /(?:\u5B66\u672F|\u62A5\u544A|\u8BBA\u575B|\u8BB2\u5802|lecture|seminar)/i.test(text)) return true;
+      return hasWid && hasDateTime && hasStatus && hasAction;
+    };
+    if (!isYddjPage || !isHdyyRoute) {
+      return { lectures: [], rootsCount: 0, seedsCount: 0 };
+    }
+    const roots = collectAccessibleRoots();
+
+    const seeds = [];
+    const seedSet = new Set();
+    const pushSeed = (node) => {
+      if (!node || seedSet.has(node)) return;
+      seedSet.add(node);
+      seeds.push(node);
+    };
+
+    for (const root of roots) {
+      try {
+        for (const n of querySeedsDeep(root, LECTURE_SEED_SELECTOR)) pushSeed(n);
+      } catch (err) {
+        console.warn("SEU reserve - query in root failed:", err);
+      }
+    }
+
+    if (seeds.length === 0) {
+      const fallbackSelector = [
+        ".bh-list-item", ".bh-card", ".ant-list-item", ".el-card", ".el-table__row",
+        "[class*='item']", "[class*='card']", "[class*='list']",
+        "li", "tr", "article", "section", "[role='listitem']", "[role='row']"
+      ].join(", ");
+      for (const root of roots) {
+        try {
+          const nodes = querySeedsDeep(root, fallbackSelector).slice(0, 2500);
+          for (const node of nodes) {
+            const text = normalizeLectureText(node.textContent || "");
+            if (!text || text.length < 2 || text.length > 260) continue;
+            const hasDate = /\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/.test(text);
+            const hasTime = /\d{1,2}:\d{2}/.test(text);
+            const hasAction = hasActionNode(node);
+            const hinted = statusWordRe.test(text) || cultureEventRe.test(text) || (lectureHintRe.test(text) && hasAction) || ((hasDate && hasTime) && !nonLectureRe.test(text));
+            if (!hinted) continue;
+            if (!hasAction && !(hasDate && hasTime) && !statusWordRe.test(text)) continue;
+            pushSeed(node);
+          }
+        } catch (err) {
+          console.warn("SEU reserve - fallback seed scan failed:", err);
+        }
+      }
+    }
+
+    const seen = new Set();
+    const lectures = [];
+    const addLecture = (wid, title, timeStr = "", statusText = "", fallbackNo = 0, reserveStartStr = "") => {
+      const cleanWid = String(wid || "").trim();
+      const cleanTitle = normalizeLectureText(title);
+      const cleanTime = normalizeLectureText(timeStr);
+      const cleanStatus = normalizeLectureText(statusText);
+      const cleanReserveStart = normalizeLectureText(reserveStartStr);
+      const key = cleanWid
+        ? `wid:${cleanWid}`
+        : `virtual:${cleanTitle || `item-${fallbackNo || lectures.length + 1}`}|${cleanReserveStart || cleanTime}`;
+      if (seen.has(key)) return;
+      if (!cleanWid && !cleanTitle && !cleanStatus) return;
+      seen.add(key);
+      lectures.push({
+        id: key,
+        wid: cleanWid,
+        title: cleanTitle || `讲座 ${fallbackNo || lectures.length}`,
+        timeStr: cleanTime,
+        reserveStartStr: cleanReserveStart,
+        statusText: cleanStatus
+      });
+    };
+
+    let fallbackCounter = 1;
+
+    // Specialized parser for yddj activity cards.
+    for (const root of roots) {
+      try {
+        const cards = querySeedsDeep(root, ".activity-container");
+        for (const card of cards) {
+          const titleEl = card.querySelector(".activity-name .mint-text[title], .activity-name [title], .activity-name .mint-text");
+          if (!titleEl) continue;
+
+          const title = normalizeLectureText(
+            (titleEl.getAttribute && (titleEl.getAttribute("title") || titleEl.getAttribute("data-title")))
+            || titleEl.textContent
+          );
+          if (!title || excludeTitleRe.test(title)) continue;
+
+          const category = normalizeLectureText(
+            (card.querySelector(".hdxq-hdlx .mint-text") && card.querySelector(".hdxq-hdlx .mint-text").textContent) || ""
+          );
+          const statusText = normalizeLectureText(
+            (card.querySelector(".ydd-button-small") && card.querySelector(".ydd-button-small").textContent) || ""
+          );
+          const lectureTimeText = normalizeLectureText(
+            (card.querySelector(".activity-text .mint-text[title*='/']") && card.querySelector(".activity-text .mint-text[title*='/']").getAttribute("title")) || ""
+          );
+          const reserveTimeText = normalizeLectureText(
+            (card.querySelector(".activity-time") && card.querySelector(".activity-time").textContent) || ""
+          );
+          const scopeText = normalizeLectureText(card.textContent || "");
+          const hasAction = hasActionNode(card);
+          const hasDateTime = Boolean(parseDateTimeText(lectureTimeText || reserveTimeText || scopeText));
+          const wid = extractWidFromNodeDeep(card) || "";
+
+          if (!isLikelyLecture(`${title} ${category}`, scopeText, Boolean(wid), { hasAction, hasDateTime })) {
+            continue;
+          }
+
+          const timeStr = parseDateTimeText(lectureTimeText || reserveTimeText || scopeText);
+          const reserveStartStr = parseReserveStartText(reserveTimeText || scopeText);
+          addLecture(wid, title, timeStr, statusText || category, fallbackCounter++, reserveStartStr);
+        }
+      } catch (err) {
+        console.warn("SEU reserve - parse activity-container failed:", err);
+      }
+    }
+
+    for (const seed of seeds) {
+      try {
+        if (seed.closest && seed.closest(".activity-container")) continue;
+        const nested = seed.querySelector ? seed.querySelector("a[href], [data-wid], [onclick], button, input") : null;
+        const wid = extractWidFromElement(seed)
+          || extractWidFromElement(nested)
+          || extractWidFromRaw(seed.textContent)
+          || extractWidFromRaw(seed.innerHTML)
+          || extractWidFromNodeDeep(seed);
+
+        const container = seed.closest && seed.closest("div.bh-mb-16, tr, li, .bh-card, .bh-list-item, .ant-list-item, .el-card, .el-table__row, [class*='item'], [class*='card'], [class*='list']");
+        const scope = container || seed;
+        const titleNode = scope.querySelector && scope.querySelector(".mint-text.ydd-text-overflow.mt-color-default[title], [class*='ydd-text-overflow'][title], [title], [data-title], h1, h2, h3, h4, .title, .name, .bh-text-color-primary, a, strong, b");
+        let title = (titleNode && titleNode.getAttribute && (titleNode.getAttribute("title") || titleNode.getAttribute("data-title")))
+          || (titleNode && titleNode.textContent)
+          || (seed.getAttribute && (seed.getAttribute("title") || seed.getAttribute("aria-label")))
+          || "";
+        title = normalizeLectureText(title);
+        if (!title || titleBanRe.test(title)) {
+          const scopeText = normalizeLectureText(scope.textContent || "");
+          const cleaned = scopeText
+            .replace(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?/g, " ")
+            .replace(/(?:\u672A\u5F00\u653E|\u5DF2\u6EE1|\u5DF2\u7ED3\u675F|\u9884\u7EA6|\u62A5\u540D|\u8FDB\u884C\u4E2D|\u5F00\u653E|\u5DF2\u9884\u7EA6|\u622A\u6B62|reserve|signup|registration|open|full|closed|available|unavailable)/gi, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          title = cleaned || "";
+        }
+        const statusText = normalizeLectureText(seed.textContent || "");
+        const scopeText = normalizeLectureText(scope.textContent || "");
+        const hasAction = hasActionNode(scope);
+        const hasDateTime = /\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/.test(scopeText) && /\d{1,2}:\d{2}/.test(scopeText);
+        const timeStr = parseDateTimeText(scope.textContent);
+        const reserveStartStr = parseReserveStartText(scopeText);
+        if (!isLikelyLecture(title, scopeText, Boolean(wid), { hasAction, hasDateTime })) {
+          continue;
+        }
+        if (wid) {
+          addLecture(wid, title, timeStr, statusText, fallbackCounter++, reserveStartStr);
+          continue;
+        }
+        if (statusWordRe.test(statusText) || lectureHintRe.test(statusText) || cultureEventRe.test(title) || /【[^】]{1,16}】/.test(title)) {
+          addLecture("", title, timeStr, statusText, fallbackCounter++, reserveStartStr);
+        }
+      } catch (err) {
+        console.warn("SEU reserve - parse item failed:", err);
+      }
+    }
+
+    if (lectures.length === 0) {
+      for (const root of roots) {
+        try {
+          const html = (root.documentElement && root.documentElement.innerHTML) || "";
+          const patterns = [
+            /(?:\?|&)(?:WID|wid)=([A-Za-z0-9_-]+)/g,
+            /"(?:WID|wid)"\s*:\s*"([A-Za-z0-9_-]+)"/g
+          ];
+          for (const re of patterns) {
+            let m = null;
+            while ((m = re.exec(html)) !== null) {
+              addLecture(m[1], `讲座 ${m[1]}`, "", "", fallbackCounter++, "");
+            }
+          }
+        } catch (err) {
+          console.warn("SEU reserve - html fallback parse failed:", err);
+        }
+      }
+    }
+
+    return { lectures, rootsCount: roots.length, seedsCount: seeds.length };
+  };
+
+  const reportDetectedLectures = (lectures) => {
+    try {
+      if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) return;
+      chrome.runtime.sendMessage({ type: "reportDetectedLectures", lectures }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (err) {
+      // Ignore reporting failures.
+    }
+  };
+
+  const scrapeAndRenderLecturesV2 = (tasks = []) => {
+    detectedListEl.innerHTML = "";
+    const normalizeTaskTitle = (title) => normalizeLectureText(title)
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/[【】[\]()（）"'`.,，。!！?？:：;；\-—_]/g, "");
+    const normalizeTimeKey = (timeText) => normalizeLectureText(timeText).replace(/\s+/g, "").replace(/[-/:]/g, "");
+    const existingTaskKeys = new Set(
+      (tasks || []).map((t) => {
+        const wid = String((t && t.wid) || "").trim();
+        if (wid) return `w:${wid}`;
+        const keyTitle = normalizeTaskTitle(t && t.title);
+        return keyTitle ? `t:${keyTitle}` : "";
+      }).filter(Boolean)
+    );
+    const emptyHtml = '<p style="font-size:12px; color:#5a4c34; text-align:center;">当前页面没有可识别的讲座。</p>';
+
+    const local = collectLecturesFromLocalPage();
+    const lectureMap = new Map();
+    const titleKeyIndex = new Map();
+
+    const addFromAny = (item) => {
+      const wid = String(item && item.wid ? item.wid : "").trim();
+      const id = String(item && item.id ? item.id : "").trim();
+      const title = normalizeLectureText(item && item.title) || (wid ? `讲座 ${wid}` : "讲座");
+      const reserveStartStr = normalizeLectureText(item && item.reserveStartStr);
+      const timeStr = normalizeLectureText(item && item.timeStr);
+      const statusText = normalizeLectureText(item && item.statusText);
+      const titleKey = normalizeTaskTitle(title);
+      const whenKey = normalizeTimeKey(reserveStartStr || timeStr);
+
+      let key = "";
+      if (wid) {
+        key = `w:${wid}`;
+      } else if (titleKey && titleKeyIndex.has(titleKey)) {
+        key = titleKeyIndex.get(titleKey);
+      } else if (titleKey) {
+        key = `t:${titleKey}|${whenKey}`;
+      } else if (id) {
+        key = `i:${id}`;
+      }
+      if (!key) return;
+
+      if (wid && titleKey && titleKeyIndex.has(titleKey)) {
+        const oldKey = titleKeyIndex.get(titleKey);
+        const oldVal = lectureMap.get(oldKey);
+        if (oldVal && !oldVal.wid) {
+          lectureMap.delete(oldKey);
+        }
+      }
+
+      const existing = lectureMap.get(key);
+      if (existing) {
+        const existingFromLocal = Boolean(existing._fromLocal);
+        const currentFromLocal = Boolean(item && item._fromLocal);
+        const preferCurrent = currentFromLocal && !existingFromLocal;
+        lectureMap.set(key, {
+          ...existing,
+          wid: existing.wid || wid,
+          title: preferCurrent ? title : (existing.title || title),
+          timeStr: preferCurrent ? (timeStr || existing.timeStr) : (existing.timeStr || timeStr),
+          reserveStartStr: preferCurrent ? (reserveStartStr || existing.reserveStartStr) : (existing.reserveStartStr || reserveStartStr),
+          statusText: preferCurrent ? (statusText || existing.statusText) : (existing.statusText || statusText),
+          _fromLocal: existingFromLocal || currentFromLocal
+        });
+      } else {
+        lectureMap.set(key, {
+          id: key,
+          wid,
+          title,
+          timeStr,
+          reserveStartStr,
+          statusText,
+          _fromLocal: Boolean(item && item._fromLocal)
+        });
+      }
+      if (titleKey) titleKeyIndex.set(titleKey, key);
+    };
+
+    local.lectures.forEach((x) => addFromAny({ ...x, _fromLocal: true }));
+    reportDetectedLectures(local.lectures);
+    const lectures = Array.from(lectureMap.values());
+
+    if (lectures.length === 0) {
+      let sampleHtml = "";
+      try {
+        const sample = Array.from(document.querySelectorAll(LECTURE_SEED_SELECTOR))
+          .slice(0, 2)
+          .map((el) => normalizeLectureText(el.outerHTML || "").slice(0, 180))
+          .filter(Boolean)
+          .join(" | ");
+        if (sample) {
+          sampleHtml = `<p style="font-size:10px; color:#9aa0a6; text-align:center; margin:6px 6px 0; word-break:break-all;">样本：${sample}</p>`;
+        }
+      } catch (err) {
+        // Ignore sample build errors.
+      }
+      detectedListEl.innerHTML = `${emptyHtml}<p style="font-size:11px; color:#9aa0a6; text-align:center; margin-top:6px;">根节点数：${local.rootsCount}，候选数：${local.seedsCount}</p>${sampleHtml}`;
+      return;
+    }
+
+    lectures.forEach(({ wid, title, timeStr, reserveStartStr, statusText }) => {
+      const lectureEl = document.createElement("div");
+      lectureEl.className = "seu-reserve-lecture-item";
+      lectureEl.innerHTML = `
+        <div class="seu-reserve-lecture-title"></div>
+        <div class="seu-reserve-lecture-inputs">
+          <input class="seu-reserve-input time-input" placeholder="预约时间 YYYY-MM-DD HH:MM:SS" />
+          <button class="seu-reserve-btn primary schedule-btn">预约</button>
+        </div>
+      `;
+
+      lectureEl.querySelector(".seu-reserve-lecture-title").textContent = title;
+      const timeInput = lectureEl.querySelector(".time-input");
+      timeInput.value = reserveStartStr || timeStr;
+
+      const scheduleBtn = lectureEl.querySelector(".schedule-btn");
+      scheduleBtn.dataset.wid = wid || "";
+      scheduleBtn.dataset.title = title;
+      scheduleBtn.dataset.reserveStartStr = reserveStartStr || "";
+      const lectureKey = wid ? `w:${wid}` : `t:${normalizeTaskTitle(title)}`;
+      const isExisting = existingTaskKeys.has(lectureKey);
+      const hardBlocked = /(已满|已结束|截止)/.test(String(statusText || ""));
+      if (!wid) {
+        scheduleBtn.textContent = hardBlocked ? (statusText || "暂不可预约") : "提前预约";
+        timeInput.disabled = false;
+      }
+
+      if (isExisting) {
+        scheduleBtn.disabled = true;
+        scheduleBtn.textContent = "已预约";
+      }
+      if (!isExisting && hardBlocked) {
+        scheduleBtn.disabled = true;
+      }
+
+      scheduleBtn.addEventListener("click", (e) => {
+        const btn = e.target;
+        if (btn.disabled) return;
+
+        const scheduledAt = parseTime(timeInput.value);
+        if (!scheduledAt) {
+          updateStatus("时间格式不正确", true);
+          return;
+        }
+
+        btn.disabled = true;
+        updateStatus(btn.dataset.wid ? "正在创建任务..." : "正在创建提前预约任务...");
+
+        chrome.runtime.sendMessage(
+          {
+            type: "createTask",
+            wid: btn.dataset.wid || "",
+            title: btn.dataset.title || "",
+            scheduledAt,
+            reserveStartStr: btn.dataset.reserveStartStr || "",
+            preSchedule: !btn.dataset.wid
+          },
+          (resp) => {
+            if (resp && resp.ok) {
+              updateStatus(btn.dataset.wid ? "任务已创建。" : "提前预约任务已创建，开放后会自动匹配并提交。");
+              btn.textContent = "已预约";
+              refreshAll();
+            } else {
+              updateStatus("创建任务失败。", true);
+              btn.disabled = false;
+            }
+          }
+        );
+      });
+
+      detectedListEl.appendChild(lectureEl);
+    });
   };
 
   const renderTasks = (tasks) => {
@@ -562,11 +1109,37 @@
         item.querySelector('.time-label').textContent = formatTime(task.scheduledAt);
 
         item.querySelector('.cancel-btn').addEventListener('click', () => {
+          if (!task || !task.id) {
+            updateStatus("任务信息无效，无法取消。", true);
+            return;
+          }
           try {
+            if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+              updateStatus("扩展上下文不可用，请刷新页面后重试。", true);
+              return;
+            }
             chrome.runtime.sendMessage({ type: "removeTask", id: task.id }, () => {
-              if (!chrome.runtime.lastError) refreshAll();
+              const runtimeErr = chrome.runtime.lastError;
+              if (runtimeErr) {
+                const msg = String(runtimeErr.message || "");
+                if (msg.includes("Extension context invalidated")) {
+                  updateStatus("扩展已更新，请刷新页面后重试。", true);
+                } else {
+                  updateStatus(`取消失败：${msg || "未知错误"}`, true);
+                }
+                return;
+              }
+              refreshAll();
             });
-          } catch (err) { console.warn("SEU reserve cancel error:", err); }
+          } catch (err) {
+            const msg = String((err && err.message) || err || "");
+            if (msg.includes("Extension context invalidated")) {
+              updateStatus("扩展已更新，请刷新页面后重试。", true);
+            } else {
+              console.warn("SEU reserve cancel error:", err);
+              updateStatus("取消失败，请稍后重试。", true);
+            }
+          }
         });
         taskListEl.appendChild(item);
       });
@@ -581,7 +1154,7 @@
 
         const tasks = (resp && resp.ok) ? (resp.tasks || []) : [];
         renderTasks(tasks);
-        scrapeAndRenderLectures(tasks);
+        scrapeAndRenderLecturesV2(tasks);
       });
     } catch (err) {
       if (String(err.message).includes("Extension context invalidated")) {
@@ -637,10 +1210,42 @@
 
   refreshBtn.addEventListener("click", refreshAll);
 
+  let frameReportTimer = null;
+  let frameReportDebounce = null;
+  let frameReportObserver = null;
+
+  const reportLocalLecturesNow = () => {
+    const local = collectLecturesFromLocalPage();
+    reportDetectedLectures(local.lectures);
+  };
+
+  reportLocalLecturesNow();
+  frameReportTimer = setInterval(reportLocalLecturesNow, isTopWindow ? 5000 : 3000);
+  frameReportObserver = new MutationObserver(() => {
+    if (frameReportDebounce) return;
+    frameReportDebounce = setTimeout(() => {
+      frameReportDebounce = null;
+      reportLocalLecturesNow();
+    }, 700);
+  });
+  if (document.body) {
+    frameReportObserver.observe(document.body, { childList: true, subtree: true });
+  } else {
+    document.addEventListener("DOMContentLoaded", () => {
+      if (document.body && frameReportObserver) {
+        frameReportObserver.observe(document.body, { childList: true, subtree: true });
+      }
+    }, { once: true });
+  }
+
   window.addEventListener("beforeunload", () => {
     if (refreshTimer) clearInterval(refreshTimer);
     if (refreshScheduled) clearTimeout(refreshScheduled);
     if (observer) observer.disconnect();
+    if (frameReportTimer) clearInterval(frameReportTimer);
+    if (frameReportDebounce) clearTimeout(frameReportDebounce);
+    if (frameReportObserver) frameReportObserver.disconnect();
   });
 
 })();
+
