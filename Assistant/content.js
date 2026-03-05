@@ -276,7 +276,15 @@
     .status-sticker.running { background: #fcf3cf; color: #b7950b; border: 1px solid #f9e79f; }
     .status-sticker.success { background: #d5f5e3; color: #1e8449; border: 1px solid #abebc6; }
     .status-sticker.failed { background: #fadbd8; color: #943126; border: 1px solid #f5b7b1; }
-    
+
+    .result-label {
+      margin-top: 5px;
+      font-size: 11px;
+      color: #7f8c8d;
+      word-break: break-all;
+      line-height: 1.35;
+    }
+
     .cancel-btn {
       background: transparent;
       border: 1px solid #c0392b;
@@ -424,6 +432,22 @@
       case "cancelled": return "已取消";
       default: return status || "-";
     }
+  };
+
+  const resultLabel = (result) => {
+    const key = String(result || "").trim();
+    if (!key) return "";
+    const table = {
+      captcha_not_configured: "\u9a8c\u8bc1\u7801\u914d\u7f6e\u4e0d\u5b8c\u6574",
+      wid_not_found: "\u672a\u5339\u914d\u5230\u6d3b\u52a8ID",
+      max_attempts: "\u8fbe\u5230\u6700\u5927\u91cd\u8bd5\u6b21\u6570",
+      login_required: "\u767b\u5f55\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55",
+      wid_resolved: "\u5df2\u81ea\u52a8\u5339\u914d\u6d3b\u52a8ID",
+      already_reserved: "\u5df2\u9884\u7ea6\uff0c\u65e0\u9700\u91cd\u590d\u63d0\u4ea4",
+      network_error: "\u7f51\u7edc\u5f02\u5e38",
+      ended: "\u6d3b\u52a8\u5df2\u622a\u6b62"
+    };
+    return table[key] || key;
   };
 
   const formatTime = (ms) => {
@@ -597,6 +621,112 @@
     return null;
   };
 
+  const looksLikeWidValue = (value) => {
+    const s = String(value || "").trim();
+    if (!s) return false;
+    if (/^[a-fA-F0-9]{32}$/.test(s)) return true;
+    if (/^[A-Za-z0-9._:-]{16,64}$/.test(s)) return true;
+    return false;
+  };
+
+  const extractWidFromObject = (input, maxDepth = 5, maxNodes = 1200) => {
+    if (!input || (typeof input !== "object" && typeof input !== "function")) return null;
+
+    const queue = [{ value: input, depth: 0 }];
+    const visited = new Set();
+    let scanned = 0;
+
+    while (queue.length > 0 && scanned < maxNodes) {
+      const { value, depth } = queue.shift();
+      if (!value) continue;
+
+      const t = typeof value;
+      if (t !== "object" && t !== "function") {
+        if (t === "string") {
+          const fromRaw = extractWidFromRaw(value);
+          if (fromRaw) return fromRaw;
+          if (looksLikeWidValue(value)) return String(value).trim();
+        }
+        continue;
+      }
+
+      if (visited.has(value)) continue;
+      visited.add(value);
+      scanned += 1;
+      if (depth > maxDepth) continue;
+
+      let keys = [];
+      try {
+        keys = Object.keys(value);
+      } catch (err) {
+        continue;
+      }
+
+      for (const key of keys) {
+        let child = null;
+        try {
+          child = value[key];
+        } catch (err) {
+          continue;
+        }
+
+        if (/(?:^|[_-])(wid|WID)(?:$|[_-])/.test(String(key))) {
+          const direct = extractWidFromRaw(child);
+          if (direct) return direct;
+          if (looksLikeWidValue(child)) return String(child).trim();
+        }
+
+        const childType = typeof child;
+        if (childType === "string") {
+          const parsed = extractWidFromRaw(child);
+          if (parsed) return parsed;
+        } else if ((childType === "object" || childType === "function") && child) {
+          queue.push({ value: child, depth: depth + 1 });
+        }
+      }
+    }
+
+    return null;
+  };
+
+  const extractWidFromVueNode = (node) => {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+
+    const candidates = [];
+    const seen = new Set();
+    const push = (v) => {
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      candidates.push(v);
+    };
+
+    let cur = node;
+    let hop = 0;
+    while (cur && hop < 6) {
+      hop += 1;
+      try {
+        push(cur.__vue__);
+      } catch (err) {}
+      try {
+        push(cur.__vueParentComponent);
+      } catch (err) {}
+      try {
+        push(cur.__vnode);
+      } catch (err) {}
+      try {
+        const own = Object.keys(cur).filter((k) => /^__v|^__vue/i.test(k)).slice(0, 20);
+        for (const k of own) push(cur[k]);
+      } catch (err) {}
+      cur = cur.parentElement;
+    }
+
+    for (const c of candidates) {
+      const wid = extractWidFromObject(c);
+      if (wid) return wid;
+    }
+    return null;
+  };
+
   const extractWidFromNodeDeep = (root) => {
     if (!root || !root.querySelectorAll) return null;
     const queue = [root, ...Array.from(root.querySelectorAll("*")).slice(0, 300)];
@@ -613,9 +743,14 @@
         }
       }
 
+      const vueWid = extractWidFromVueNode(node);
+      if (vueWid) return vueWid;
+
       const textWid = extractWidFromRaw(node.textContent);
       if (textWid) return textWid;
     }
+    const rootVueWid = extractWidFromVueNode(root);
+    if (rootVueWid) return rootVueWid;
     const htmlWid = extractWidFromRaw(root.innerHTML || "");
     if (htmlWid) return htmlWid;
     return null;
@@ -623,6 +758,8 @@
 
   const extractWidFromElement = (element) => {
     if (!element) return null;
+    const vueWid = extractWidFromVueNode(element);
+    if (vueWid) return vueWid;
     const attrs = ["data-wid", "wid", "href", "onclick", "data-url", "data-href", "data-link", "value"];
     for (const attr of attrs) {
       const wid = extractWidFromRaw(element.getAttribute && element.getAttribute(attr));
@@ -711,6 +848,36 @@
       return { lectures: [], rootsCount: 0, seedsCount: 0 };
     }
     const roots = collectAccessibleRoots();
+    const rootHtmlCache = roots.map((root) => {
+      try {
+        return (root.documentElement && root.documentElement.innerHTML) || "";
+      } catch (err) {
+        return "";
+      }
+    }).filter(Boolean);
+
+    const inferWidFromPageByHint = (...hints) => {
+      const candidates = hints
+        .map((x) => normalizeLectureText(x))
+        .filter((x) => x && x.length >= 4)
+        .slice(0, 6);
+      if (candidates.length === 0 || rootHtmlCache.length === 0) return "";
+
+      for (const html of rootHtmlCache) {
+        for (const hint of candidates) {
+          let from = 0;
+          for (let i = 0; i < 3; i += 1) {
+            const idx = html.indexOf(hint, from);
+            if (idx < 0) break;
+            const slice = html.slice(Math.max(0, idx - 1800), Math.min(html.length, idx + hint.length + 1800));
+            const wid = extractWidFromRaw(slice);
+            if (wid) return wid;
+            from = idx + hint.length;
+          }
+        }
+      }
+      return "";
+    };
 
     const seeds = [];
     const seedSet = new Set();
@@ -809,7 +976,8 @@
           const scopeText = normalizeLectureText(card.textContent || "");
           const hasAction = hasActionNode(card);
           const hasDateTime = Boolean(parseDateTimeText(lectureTimeText || reserveTimeText || scopeText));
-          const wid = extractWidFromNodeDeep(card) || "";
+          let wid = extractWidFromNodeDeep(card) || "";
+          if (!wid) wid = inferWidFromPageByHint(title, lectureTimeText, reserveTimeText, scopeText) || "";
 
           if (!isLikelyLecture(`${title} ${category}`, scopeText, Boolean(wid), { hasAction, hasDateTime })) {
             continue;
@@ -828,7 +996,7 @@
       try {
         if (seed.closest && seed.closest(".activity-container")) continue;
         const nested = seed.querySelector ? seed.querySelector("a[href], [data-wid], [onclick], button, input") : null;
-        const wid = extractWidFromElement(seed)
+        let wid = extractWidFromElement(seed)
           || extractWidFromElement(nested)
           || extractWidFromRaw(seed.textContent)
           || extractWidFromRaw(seed.innerHTML)
@@ -857,6 +1025,7 @@
         const hasDateTime = /\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/.test(scopeText) && /\d{1,2}:\d{2}/.test(scopeText);
         const timeStr = parseDateTimeText(scope.textContent);
         const reserveStartStr = parseReserveStartText(scopeText);
+        if (!wid) wid = inferWidFromPageByHint(title, scopeText, timeStr, reserveStartStr) || "";
         if (!isLikelyLecture(title, scopeText, Boolean(wid), { hasAction, hasDateTime })) {
           continue;
         }
@@ -1099,6 +1268,7 @@
               <span class="status-sticker ${task.status || ''}"></span>
               <span class="time-label"></span>
             </div>
+            <div class="result-label"></div>
           </div>
           <div class="seu-reserve-task-actions">
             <button class="cancel-btn">取消</button>
@@ -1107,6 +1277,15 @@
         item.querySelector('.seu-reserve-task-title').textContent = task.title || "未命名任务";
         item.querySelector('.status-sticker').textContent = statusLabel(task.status);
         item.querySelector('.time-label').textContent = formatTime(task.scheduledAt);
+        const reasonEl = item.querySelector('.result-label');
+        const reasonText = resultLabel(task.lastResult);
+        if (reasonText) {
+          reasonEl.textContent = `\u7ed3\u679c\uff1a${reasonText}`;
+          if (task.status === "failed") reasonEl.style.color = "#c0392b";
+          if (task.status === "success") reasonEl.style.color = "#1e8449";
+        } else {
+          reasonEl.remove();
+        }
 
         item.querySelector('.cancel-btn').addEventListener('click', () => {
           if (!task || !task.id) {

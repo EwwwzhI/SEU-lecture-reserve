@@ -71,7 +71,7 @@ function normalizeTitleForMatch(title) {
   return String(title || "")
     .toLowerCase()
     .replace(/\s+/g, "")
-    .replace(/[【】[\]()（）"'`.,，。!！?？:：;；\-—_]/g, "");
+    .replace(/[\u3010\u3011\[\]\(\)\uFF08\uFF09"'`.,\uFF0C\u3002!\uFF01?\uFF1F:\uFF1A;\uFF1B\-\u2014_]/g, "");
 }
 
 function titleLooksMatched(a, b) {
@@ -82,7 +82,247 @@ function titleLooksMatched(a, b) {
   return x.includes(y) || y.includes(x);
 }
 
-function resolveWidForTask(task) {
+const widProbeMemo = new Map();
+
+function upsertDetectedLecture(tabId, lecture) {
+  const normalized = normalizeDetectedLecture(lecture);
+  if (!normalized) return;
+  if (!detectedLecturesByTab[tabId]) detectedLecturesByTab[tabId] = Object.create(null);
+  const frameKey = "__probe__";
+  const bucket = detectedLecturesByTab[tabId][frameKey] || { updatedAt: 0, lectures: [] };
+  const list = Array.isArray(bucket.lectures) ? bucket.lectures.slice(0, 300) : [];
+  const key = normalized.wid || normalized.id;
+  const map = new Map();
+  for (const x of list) {
+    const n = normalizeDetectedLecture(x);
+    if (!n) continue;
+    const k = n.wid || n.id;
+    if (!k) continue;
+    map.set(k, n);
+  }
+  map.set(key, normalized);
+  detectedLecturesByTab[tabId][frameKey] = {
+    updatedAt: Date.now(),
+    lectures: Array.from(map.values()).slice(0, 300)
+  };
+}
+
+function executeScriptCompat(details) {
+  return new Promise((resolve, reject) => {
+    if (!chrome || !chrome.scripting || !chrome.scripting.executeScript) {
+      reject(new Error("scripting_unavailable"));
+      return;
+    }
+    chrome.scripting.executeScript(details, (results) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(String(err.message || err)));
+        return;
+      }
+      resolve(results || []);
+    });
+  });
+}
+
+async function resolveWidFromTabProbe(tabId, taskTitle) {
+  const numericTabId = Number(tabId);
+  if (!Number.isFinite(numericTabId)) return "";
+  const normalizedTitle = normalizeTitleForMatch(taskTitle);
+  if (!normalizedTitle) return "";
+
+  const memoKey = `${numericTabId}|${normalizedTitle}`;
+  const now = Date.now();
+  const memo = widProbeMemo.get(memoKey);
+  if (memo && now - Number(memo.ts || 0) < 5000) {
+    return String(memo.wid || "").trim();
+  }
+
+  const runProbe = async (mainWorld) => {
+    const details = {
+      target: { tabId: numericTabId, allFrames: true },
+      args: [String(taskTitle || "")],
+      func: (taskTitleArg) => {
+        const normalize = (v) => String(v || "")
+          .toLowerCase()
+          .replace(/\s+/g, "")
+          .replace(/[\u3010\u3011\[\]\(\)\uFF08\uFF09"'`.,\uFF0C\u3002!\uFF01?\uFF1F:\uFF1A;\uFF1B\-\u2014_]/g, "");
+
+        const targetNorm = normalize(taskTitleArg);
+        if (!targetNorm) return "";
+
+        const titleMatch = (a, b) => {
+          const x = normalize(a);
+          const y = normalize(b);
+          if (!x || !y) return false;
+          return x === y || x.includes(y) || y.includes(x);
+        };
+
+        const extractWidRaw = (raw) => {
+          const text = String(raw || "");
+          if (!text) return "";
+          const patterns = [
+            /(?:\?|&|#)(?:WID|wid)=([^&#"'`\s]+)/i,
+            /(?:%3F|%26)(?:WID|wid)(?:=|%3D)([^&#"'`\s%]+)/i,
+            /["'`](?:WID|wid)["'`]\s*:\s*["'`]([^"'`]+)["'`]/i,
+            /(?:^|[{"'`\s,;])(?:WID|wid)\s*[:=]\s*["'`]?([A-Za-z0-9._:-]{4,})/i,
+            /\/(?:WID|wid)\/([^/?#"'`\s]+)/i
+          ];
+          for (const pattern of patterns) {
+            const m = text.match(pattern);
+            if (!m || !m[1]) continue;
+            const cleaned = String(m[1]).replace(/["'`,;)}\]]+$/g, "").trim();
+            if (cleaned && !/^WID$/i.test(cleaned)) return cleaned;
+          }
+          return "";
+        };
+
+        const looksLikeWid = (value) => {
+          const s = String(value || "").trim();
+          if (!s) return false;
+          if (/^[a-fA-F0-9]{32}$/.test(s)) return true;
+          if (/^[A-Za-z0-9._:-]{16,64}$/.test(s)) return true;
+          return false;
+        };
+
+        const extractWidFromObject = (input, maxDepth = 5, maxNodes = 1500) => {
+          if (!input || (typeof input !== "object" && typeof input !== "function")) return "";
+          const queue = [{ value: input, depth: 0 }];
+          const visited = new Set();
+          let scanned = 0;
+          while (queue.length > 0 && scanned < maxNodes) {
+            const { value, depth } = queue.shift();
+            if (!value) continue;
+            const t = typeof value;
+            if (t !== "object" && t !== "function") continue;
+            if (visited.has(value)) continue;
+            visited.add(value);
+            scanned += 1;
+            if (depth > maxDepth) continue;
+
+            let keys = [];
+            try { keys = Object.keys(value); } catch (err) { continue; }
+
+            let titleHit = false;
+            for (const key of keys) {
+              let child;
+              try { child = value[key]; } catch (err) { continue; }
+              if (typeof child === "string" && titleMatch(child, taskTitleArg)) titleHit = true;
+            }
+
+            for (const key of keys) {
+              let child;
+              try { child = value[key]; } catch (err) { continue; }
+
+              if (/(?:^|[_-])wid(?:$|[_-])/i.test(String(key))) {
+                const direct = extractWidRaw(child);
+                if (direct) return direct;
+                if (looksLikeWid(child) && titleHit) return String(child).trim();
+              }
+
+              if (typeof child === "string") {
+                const fromRaw = extractWidRaw(child);
+                if (fromRaw && titleHit) return fromRaw;
+              } else if ((typeof child === "object" || typeof child === "function") && child) {
+                queue.push({ value: child, depth: depth + 1 });
+              }
+            }
+          }
+          return "";
+        };
+
+        const extractWidFromNode = (node) => {
+          if (!node || node.nodeType !== 1) return "";
+          const attrs = ["data-wid", "wid", "href", "onclick", "data-url", "data-href", "data-link", "value"];
+          for (const attr of attrs) {
+            const v = node.getAttribute && node.getAttribute(attr);
+            const wid = extractWidRaw(v);
+            if (wid) return wid;
+          }
+          if (node.dataset) {
+            for (const v of Object.values(node.dataset)) {
+              const wid = extractWidRaw(v);
+              if (wid) return wid;
+            }
+          }
+          const vueCandidates = [];
+          const pushVue = (v) => { if (v) vueCandidates.push(v); };
+          let cur = node;
+          let hop = 0;
+          while (cur && hop < 6) {
+            hop += 1;
+            try { pushVue(cur.__vue__); } catch (err) {}
+            try { pushVue(cur.__vueParentComponent); } catch (err) {}
+            try { pushVue(cur.__vnode); } catch (err) {}
+            cur = cur.parentElement;
+          }
+          for (const v of vueCandidates) {
+            const w = extractWidFromObject(v);
+            if (w) return w;
+          }
+          const htmlWid = extractWidRaw(node.outerHTML || "");
+          if (htmlWid) return htmlWid;
+          return "";
+        };
+
+        const cards = Array.from(document.querySelectorAll(".activity-container"));
+        for (const card of cards) {
+          const titleEl = card.querySelector(".activity-name .mint-text[title], .activity-name [title], .activity-name .mint-text");
+          const title = (titleEl && ((titleEl.getAttribute && titleEl.getAttribute("title")) || titleEl.textContent)) || "";
+          if (!titleMatch(title, taskTitleArg)) continue;
+          const wid = extractWidFromNode(card);
+          if (wid) return wid;
+        }
+
+        const bodyHtml = (document.documentElement && document.documentElement.innerHTML) || "";
+        if (bodyHtml && taskTitleArg) {
+          let from = 0;
+          for (let i = 0; i < 5; i += 1) {
+            const idx = bodyHtml.indexOf(taskTitleArg, from);
+            if (idx < 0) break;
+            const slice = bodyHtml.slice(Math.max(0, idx - 2500), Math.min(bodyHtml.length, idx + taskTitleArg.length + 2500));
+            const wid = extractWidRaw(slice);
+            if (wid) return wid;
+            from = idx + taskTitleArg.length;
+          }
+        }
+
+        const globalCandidates = [window, window.__INITIAL_STATE__, window.__APP__, window.app, window.__NUXT__];
+        for (const g of globalCandidates) {
+          const wid = extractWidFromObject(g, 4, 1200);
+          if (wid) return wid;
+        }
+
+        return "";
+      }
+    };
+    if (mainWorld) details.world = "MAIN";
+    const results = await executeScriptCompat(details);
+    for (const entry of results || []) {
+      const candidate = String((entry && entry.result) || "").trim();
+      if (candidate) return candidate;
+    }
+    return "";
+  };
+
+  let wid = "";
+  try {
+    wid = await runProbe(true);
+  } catch (err) {
+    try {
+      wid = await runProbe(false);
+    } catch (_err) {
+      wid = "";
+    }
+  }
+
+  widProbeMemo.set(memoKey, { ts: now, wid });
+  if (wid) {
+    upsertDetectedLecture(numericTabId, { wid, title: String(taskTitle || "") });
+  }
+  return wid;
+}
+
+async function resolveWidForTask(task) {
   if (!task) return "";
   const existingWid = String(task.wid || "").trim();
   if (existingWid) return existingWid;
@@ -104,6 +344,12 @@ function resolveWidForTask(task) {
       if (titleLooksMatched(task.title, lecture.title)) return wid;
     }
   }
+
+  for (const tabId of tabCandidates) {
+    const probedWid = await resolveWidFromTabProbe(tabId, task.title);
+    if (probedWid) return probedWid;
+  }
+
   return "";
 }
 
@@ -250,16 +496,43 @@ function isCaptchaConfigured(_settings) {
 
 function classifyReserveResponse(res) {
   if (!res) {
-    return { success: false, full: false, needLogin: false, invalidVcode: false, msg: "network_error" };
+    return {
+      success: false,
+      full: false,
+      needLogin: false,
+      invalidVcode: false,
+      alreadyReserved: false,
+      notOpen: false,
+      ended: false,
+      msg: "network_error"
+    };
   }
 
   const msg = (res.msg || res.message || "").toString();
-  const success = res.code === 0 && res.datas === 1;
-  const full = msg.includes("满") || msg.includes("名额已满") || msg.includes("人数已满");
-  const needLogin = msg.includes("登录") || msg.includes("会话") || msg.includes("身份") || msg.includes("cookie");
-  const invalidVcode = msg.includes("验证码") && (msg.includes("错误") || msg.includes("不正确") || msg.includes("无效"));
+  const compactMsg = msg.replace(/\s+/g, "");
+  const code = res.code;
+  const datas = res.datas;
+  const codeOk = code === 0 || code === "0";
+  const dataOk = datas === 1 || datas === "1" || datas === true || datas === "true";
+  const successByCode = codeOk && dataOk;
+  const successByText = /(?:\u6210\u529f|\u9884\u7ea6\u6210\u529f|\u63d0\u4ea4\u6210\u529f)/.test(compactMsg);
+  const alreadyReserved = /(?:\u5df2\u9884\u7ea6|\u91cd\u590d\u9884\u7ea6|\u8bf7\u52ff\u91cd\u590d|\u4e0d\u80fd\u91cd\u590d)/.test(compactMsg);
+  const full = /(?:\u540d\u989d\u5df2\u6ee1|\u4eba\u6570\u5df2\u6ee1|\u5df2\u6ee1)/.test(compactMsg);
+  const needLogin = /(?:\u767b\u5f55|\u4f1a\u8bdd|\u8eab\u4efd|cookie|\u672a\u8ba4\u8bc1|\u672a\u767b\u5f55)/i.test(compactMsg);
+  const invalidVcode = /(?:\u9a8c\u8bc1\u7801)/.test(compactMsg) && /(?:\u9519\u8bef|\u4e0d\u6b63\u786e|\u65e0\u6548|\u5931\u8d25)/.test(compactMsg);
+  const notOpen = /(?:\u672a\u5f00\u653e|\u672a\u5f00\u59cb|\u5c1a\u672a\u5f00\u59cb|\u9884\u7ea6\u672a\u5f00\u59cb)/.test(compactMsg);
+  const ended = /(?:\u5df2\u7ed3\u675f|\u5df2\u622a\u6b62|\u622a\u6b62)/.test(compactMsg);
 
-  return { success, full, needLogin, invalidVcode, msg };
+  return {
+    success: successByCode || successByText,
+    full,
+    needLogin,
+    invalidVcode,
+    alreadyReserved,
+    notOpen,
+    ended,
+    msg
+  };
 }
 
 function joinBase(baseUrl, path) {
@@ -346,6 +619,7 @@ async function attemptReserveLoop(taskId, initialWid) {
   let consecutiveFail = 0;
   let captchaFail = 0;
   let runtimeWid = String(initialWid || "").trim();
+  let lastReserveMsg = "";
 
   if (!isCaptchaConfigured(settings)) {
     return { status: "failed", msg: "captcha_not_configured" };
@@ -359,7 +633,7 @@ async function attemptReserveLoop(taskId, initialWid) {
 
     runtimeWid = String(task.wid || runtimeWid || "").trim();
     if (!runtimeWid) {
-      const resolved = resolveWidForTask(task);
+      const resolved = await resolveWidForTask(task);
       if (resolved) {
         runtimeWid = resolved;
         await updateTask(taskId, { wid: resolved, lastResult: "wid_resolved" });
@@ -387,14 +661,20 @@ async function attemptReserveLoop(taskId, initialWid) {
         continue;
       }
 
-      const { success, full, needLogin, invalidVcode, msg } = await reserveLecture(runtimeWid, vcode, settings);
-      if (success) return { status: "success", msg };
+      const { success, full, needLogin, invalidVcode, alreadyReserved, notOpen, ended, msg } = await reserveLecture(runtimeWid, vcode, settings);
+      if (msg) lastReserveMsg = String(msg);
+      if (success || alreadyReserved) return { status: "success", msg: msg || "already_reserved" };
       if (full) return { status: "full", msg };
+      if (ended) return { status: "failed", msg: msg || "ended" };
       if (needLogin) return { status: "failed", msg: msg || "login_required" };
       if (invalidVcode) {
         captchaFail += 1;
         const cooldown = Math.min(backoffMaxMs, captchaCooldownBaseMs + captchaFail * backoffStepMs);
         await delayWithJitter(cooldown, jitterMs);
+        continue;
+      }
+      if (notOpen) {
+        await delayWithJitter(intervalMs, jitterMs);
         continue;
       }
       consecutiveFail = 0;
@@ -406,7 +686,7 @@ async function attemptReserveLoop(taskId, initialWid) {
     await delayWithJitter(intervalMs, jitterMs);
   }
 
-  return { status: "failed", msg: runtimeWid ? "max_attempts" : "wid_not_found" };
+  return { status: "failed", msg: runtimeWid ? (lastReserveMsg || "max_attempts") : "wid_not_found" };
 }
 
 async function runTask(taskId) {
@@ -424,7 +704,7 @@ async function runTask(taskId) {
 
   let startWid = String(task.wid || "").trim();
   if (!startWid) {
-    const resolved = resolveWidForTask(task);
+    const resolved = await resolveWidForTask(task);
     if (resolved) {
       startWid = resolved;
       await updateTask(taskId, { wid: resolved, lastResult: "wid_resolved" });
@@ -538,6 +818,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         createdAt: now,
         updatedAt: now
       };
+      if (!task.wid) {
+        const resolved = await resolveWidForTask(task);
+        if (resolved) {
+          task.wid = resolved;
+          task.lastResult = "wid_resolved";
+        }
+      }
       await createTask(task);
       sendResponse({ ok: true, task });
       return;
