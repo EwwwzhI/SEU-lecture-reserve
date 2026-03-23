@@ -110,26 +110,14 @@
 
     /* Scrollable Areas */
     .seu-reserve-detected-list {
-      /* Strictly approx 2 items height */
-      max-height: 22vh; 
-      min-height: 100px;
-      overflow-y: auto;
-      padding-right: 4px;
-      margin-bottom: 12px;
-      flex-shrink: 0;
-      
-      /* Scrollbar Styling */
-      scrollbar-width: thin;
-      scrollbar-color: #d6dbdf transparent;
+      display: none !important;
     }
     
     .seu-reserve-tasks {
       display: flex;
       flex-direction: column;
       flex: 1;
-      min-height: 0; 
-      /* Strictly approx 2 items height */
-      max-height: 24vh;
+      min-height: 0;
     }
     
     #seu-task-list {
@@ -308,7 +296,7 @@
 
     .seu-reserve-tasks h4 {
       font-family: 'Noto Serif SC', serif;
-      margin: 20px 0 10px;
+      margin: 0 0 10px;
       border-bottom: 1px solid #bdc3c7;
       padding-bottom: 4px;
     }
@@ -332,6 +320,71 @@
       opacity: 0;
       pointer-events: none;
       transform: translateX(100%);
+    }
+
+    .seu-inline-reserve-host {
+      position: relative;
+    }
+
+    .seu-inline-reserve-action {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px dashed rgba(26, 82, 118, 0.24);
+    }
+
+    .seu-inline-reserve-copy {
+      min-width: 160px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      color: #5d6d7e;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .seu-inline-reserve-label {
+      font-family: 'Noto Serif SC', serif;
+      font-size: 12px;
+      font-weight: 700;
+      color: #1a5276;
+    }
+
+    .seu-inline-reserve-time {
+      word-break: break-all;
+    }
+
+    .seu-inline-reserve-btn {
+      border: 1px solid #1a5276;
+      background: linear-gradient(135deg, #1a5276, #2874a6);
+      color: #fff;
+      min-height: 34px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+      box-shadow: 0 4px 12px rgba(26, 82, 118, 0.18);
+    }
+
+    .seu-inline-reserve-btn:hover {
+      background: linear-gradient(135deg, #154360, #1f618d);
+      box-shadow: 0 6px 14px rgba(26, 82, 118, 0.22);
+      transform: translateY(-1px);
+    }
+
+    .seu-inline-reserve-btn:disabled {
+      border-color: #c7d1d9;
+      background: #eef2f5;
+      color: #7f8c8d;
+      box-shadow: none;
+      cursor: not-allowed;
+      transform: none;
     }
   `;
   document.head.appendChild(style);
@@ -477,6 +530,64 @@
     }
     return null;
   };
+
+  const normalizeTaskTitle = (title) => normalizeLectureText(title)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[【】[\]()（）"'`.,，。!！?？:：;；\-—_]/g, "");
+
+  const normalizeTimeKey = (timeText) => normalizeLectureText(timeText).replace(/\s+/g, "").replace(/[-/:]/g, "");
+
+  const titleLooksMatched = (a, b) => {
+    const x = normalizeTaskTitle(a);
+    const y = normalizeTaskTitle(b);
+    if (!x || !y) return false;
+    return x === y || x.includes(y) || y.includes(x);
+  };
+
+  const getLectureTaskKey = (item) => {
+    const wid = String((item && item.wid) || "").trim();
+    if (wid) return `w:${wid}`;
+    const titleKey = normalizeTaskTitle(item && item.title);
+    return titleKey ? `t:${titleKey}` : "";
+  };
+
+  const getExistingTaskKeys = (tasks = []) => new Set(
+    (tasks || []).map((task) => getLectureTaskKey(task)).filter(Boolean)
+  );
+
+  const getLectureScheduleText = (lecture) => normalizeLectureText(
+    (lecture && (lecture.reserveStartStr || lecture.timeStr)) || ""
+  );
+
+  const getTaskScheduleText = (task) => {
+    const direct = normalizeLectureText(
+      (task && (task.reserveStartStr || task.timeStr)) || ""
+    );
+    if (direct) return direct;
+
+    const scheduledAt = Number(task && task.scheduledAt);
+    if (!Number.isFinite(scheduledAt) || scheduledAt <= 0) return "";
+    const dt = new Date(scheduledAt);
+    return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}:${pad2(dt.getSeconds())}`;
+  };
+
+  const doesTaskMatchLecture = (task, lecture) => {
+    if (!task || !lecture) return false;
+
+    const taskWid = String(task.wid || "").trim();
+    const lectureWid = String(lecture.wid || "").trim();
+    if (taskWid && lectureWid) return taskWid === lectureWid;
+
+    if (!titleLooksMatched(task.title, lecture.title)) return false;
+
+    const taskTimeKey = normalizeTimeKey(getTaskScheduleText(task));
+    const lectureTimeKey = normalizeTimeKey(getLectureScheduleText(lecture));
+    if (!taskTimeKey || !lectureTimeKey) return true;
+    return taskTimeKey === lectureTimeKey || taskTimeKey.includes(lectureTimeKey) || lectureTimeKey.includes(taskTimeKey);
+  };
+
+  const isHardBlockedStatus = (statusText) => /(已满|已结束|截止)/.test(String(statusText || ""));
 
   const scrapeAndRenderLectures = (tasks = []) => {
     detectedListEl.innerHTML = "";
@@ -1075,6 +1186,218 @@
     }
   };
 
+  const clearInlineReservationButtons = () => {
+    for (const node of Array.from(document.querySelectorAll(".seu-inline-reserve-action"))) {
+      node.remove();
+    }
+    for (const node of Array.from(document.querySelectorAll(".seu-inline-reserve-host"))) {
+      node.classList.remove("seu-inline-reserve-host");
+    }
+  };
+
+  const collectInlineLectureHosts = () => {
+    const hosts = [];
+    const seenRoots = new Set();
+
+    const buildHost = (root) => {
+      if (!root || seenRoots.has(root)) return;
+      seenRoots.add(root);
+
+      const titleNode = root.querySelector && root.querySelector(
+        ".activity-name .mint-text[title], .activity-name [title], .activity-name .mint-text, .mint-text.ydd-text-overflow.mt-color-default[title], [class*='ydd-text-overflow'][title], [data-title], [title], .bh-text-color-primary, a, strong, b"
+      );
+      const title = normalizeLectureText(
+        (titleNode && titleNode.getAttribute && (titleNode.getAttribute("title") || titleNode.getAttribute("data-title")))
+        || (titleNode && titleNode.textContent)
+        || ""
+      );
+      const scopeText = normalizeLectureText(root.textContent || "");
+      const lectureTimeText = normalizeLectureText(
+        (root.querySelector && root.querySelector(".activity-text .mint-text[title*='/']") && root.querySelector(".activity-text .mint-text[title*='/']").getAttribute("title")) || ""
+      );
+      const reserveTimeText = normalizeLectureText(
+        (root.querySelector && root.querySelector(".activity-time") && root.querySelector(".activity-time").textContent) || ""
+      );
+      const statusText = normalizeLectureText(
+        (root.querySelector && root.querySelector(".ydd-button-small") && root.querySelector(".ydd-button-small").textContent) || ""
+      );
+      const wid = extractWidFromNodeDeep(root) || "";
+      const reserveStartStr = parseReserveStartText(reserveTimeText || scopeText);
+      const timeStr = parseDateTimeText(lectureTimeText || reserveTimeText || scopeText);
+      const anchor = (root.querySelector && root.querySelector(".ydd-button-small, .activity-time, .activity-name")) || root.lastElementChild || root;
+
+      hosts.push({
+        root,
+        anchor,
+        wid,
+        title,
+        reserveStartStr,
+        timeStr,
+        statusText,
+        scopeText
+      });
+    };
+
+    for (const card of querySeedsDeep(document, ".activity-container")) {
+      buildHost(card);
+    }
+
+    if (hosts.length === 0) {
+      const fallbackRoots = querySeedsDeep(document, "div.bh-mb-16, .bh-card, .bh-list-item, .ant-list-item, .el-card, li, tr");
+      for (const root of fallbackRoots.slice(0, 120)) {
+        buildHost(root);
+      }
+    }
+
+    return hosts.filter((host) => host.title || host.wid || host.reserveStartStr || host.timeStr);
+  };
+
+  const findBestInlineHost = (lecture, hosts, usedRoots) => {
+    let best = null;
+    let bestScore = -1;
+    const lectureTimeKey = normalizeTimeKey(getLectureScheduleText(lecture));
+
+    for (const host of hosts) {
+      if (!host || !host.root || usedRoots.has(host.root)) continue;
+
+      let score = 0;
+      if (lecture.wid && host.wid && lecture.wid === host.wid) score += 100;
+      if (titleLooksMatched(lecture.title, host.title)) score += 40;
+      if (lectureTimeKey) {
+        const hostTimeKey = normalizeTimeKey(host.reserveStartStr || host.timeStr);
+        if (hostTimeKey && (lectureTimeKey === hostTimeKey || lectureTimeKey.includes(hostTimeKey) || hostTimeKey.includes(lectureTimeKey))) {
+          score += 20;
+        }
+      }
+      if (/activity-container/.test(String(host.root.className || ""))) score += 5;
+      if (score > bestScore) {
+        bestScore = score;
+        best = host;
+      }
+    }
+
+    return bestScore > 0 ? best : null;
+  };
+
+  const renderInlineReservationButtons = (tasks = [], localData = null) => {
+    clearInlineReservationButtons();
+    const local = localData || collectLecturesFromLocalPage();
+    const lectures = Array.isArray(local && local.lectures) ? local.lectures : [];
+    if (lectures.length === 0) return;
+
+    const hosts = collectInlineLectureHosts();
+    const usedRoots = new Set();
+
+    for (const lecture of lectures) {
+      const host = findBestInlineHost(lecture, hosts, usedRoots);
+      if (!host || !host.root) continue;
+      usedRoots.add(host.root);
+      host.root.classList.add("seu-inline-reserve-host");
+
+      const scheduleText = getLectureScheduleText(lecture);
+      const scheduledAt = parseTime(scheduleText);
+      const matchedTask = (tasks || []).find((task) => doesTaskMatchLecture(task, lecture)) || null;
+      const taskKey = getLectureTaskKey(matchedTask || lecture);
+      const isExisting = Boolean(matchedTask);
+      const hardBlocked = isHardBlockedStatus(lecture.statusText);
+
+      const action = document.createElement("div");
+      action.className = "seu-inline-reserve-action";
+      action.dataset.seuInlineKey = taskKey || normalizeTaskTitle(lecture.title);
+
+      const stopHostPropagation = (event) => {
+        if (!event) return;
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
+        }
+      };
+
+      const swallowHostNavigation = (event) => {
+        if (!event) return;
+        event.preventDefault();
+        stopHostPropagation(event);
+      };
+
+      for (const eventName of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend"]) {
+        action.addEventListener(eventName, stopHostPropagation);
+      }
+      for (const eventName of ["click", "dblclick"]) {
+        action.addEventListener(eventName, swallowHostNavigation);
+      }
+
+      const copy = document.createElement("div");
+      copy.className = "seu-inline-reserve-copy";
+      copy.innerHTML = `
+        <span class="seu-inline-reserve-label">预约助手</span>
+        <span class="seu-inline-reserve-time"></span>
+      `;
+
+      const noteEl = copy.querySelector(".seu-inline-reserve-time");
+      if (scheduleText) {
+        noteEl.textContent = `预约时间：${scheduleText}`;
+      } else if (lecture.statusText) {
+        noteEl.textContent = lecture.statusText;
+      } else {
+        noteEl.textContent = "未识别到预约时间";
+      }
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "seu-inline-reserve-btn";
+      button.textContent = "提前预约";
+
+      if (isExisting) {
+        button.disabled = true;
+        button.textContent = "已预约";
+      } else if (hardBlocked) {
+        button.disabled = true;
+        button.textContent = lecture.statusText || "暂不可预约";
+      } else if (!scheduledAt) {
+        button.disabled = true;
+        button.textContent = "缺少时间";
+      }
+
+      button.addEventListener("click", (event) => {
+        swallowHostNavigation(event);
+        if (button.disabled || !scheduledAt) return;
+
+        button.disabled = true;
+        updateStatus(lecture.wid ? "正在创建预约任务..." : "正在创建提前预约任务...");
+
+        chrome.runtime.sendMessage(
+          {
+            type: "createTask",
+            wid: lecture.wid || "",
+            title: lecture.title || "",
+            scheduledAt,
+            reserveStartStr: lecture.reserveStartStr || "",
+            preSchedule: !lecture.wid
+          },
+          (resp) => {
+            const runtimeErr = chrome.runtime.lastError;
+            if (runtimeErr) {
+              updateStatus(`创建任务失败：${runtimeErr.message || "未知错误"}`, true);
+              button.disabled = false;
+              return;
+            }
+            if (resp && resp.ok) {
+              updateStatus(lecture.wid ? "任务已加入计划。" : "提前预约任务已创建，开放后会自动匹配并提交。");
+              refreshAll(local);
+            } else {
+              updateStatus("创建任务失败。", true);
+              button.disabled = false;
+            }
+          }
+        );
+      });
+
+      action.appendChild(copy);
+      action.appendChild(button);
+      host.root.appendChild(action);
+    }
+  };
+
   const scrapeAndRenderLecturesV2 = (tasks = []) => {
     detectedListEl.innerHTML = "";
     const normalizeTaskTitle = (title) => normalizeLectureText(title)
@@ -1324,16 +1647,16 @@
       });
   };
 
-  const refreshAll = () => {
-    if (!isOpen || !chrome || !chrome.runtime || !chrome.runtime.sendMessage) return;
+  const refreshAll = (localData = null) => {
+    if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) return;
     try {
       chrome.runtime.sendMessage({ type: "listTasks" }, (resp) => {
         if (chrome.runtime.lastError) return;
-        if (!taskListEl || !document.body.contains(taskListEl)) return;
-
         const tasks = (resp && resp.ok) ? (resp.tasks || []) : [];
-        renderTasks(tasks);
-        scrapeAndRenderLecturesV2(tasks);
+        if (isOpen && taskListEl && document.body.contains(taskListEl)) {
+          renderTasks(tasks);
+        }
+        renderInlineReservationButtons(tasks, localData);
       });
     } catch (err) {
       if (String(err.message).includes("Extension context invalidated")) {
@@ -1354,21 +1677,26 @@
     return dock.contains(node) || handle.contains(node);
   };
 
+  const isNodeInInlineReserveUi = (node) => {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    if (node.classList && node.classList.contains("seu-inline-reserve-action")) return true;
+    return Boolean(node.closest && node.closest(".seu-inline-reserve-action"));
+  };
+
   const shouldRefreshFromMutations = (mutations) => {
     for (const mutation of mutations) {
-      if (isNodeInPanel(mutation.target)) continue;
+      if (isNodeInPanel(mutation.target) || isNodeInInlineReserveUi(mutation.target)) continue;
       for (const node of mutation.addedNodes || []) {
-        if (!isNodeInPanel(node)) return true;
+        if (!isNodeInPanel(node) && !isNodeInInlineReserveUi(node)) return true;
       }
       for (const node of mutation.removedNodes || []) {
-        if (!isNodeInPanel(node)) return true;
+        if (!isNodeInPanel(node) && !isNodeInInlineReserveUi(node)) return true;
       }
     }
     return false;
   };
 
   const scheduleRefresh = () => {
-    if (!isOpen) return;
     if (refreshScheduled) return;
     refreshScheduled = setTimeout(() => {
       refreshScheduled = null;
@@ -1379,7 +1707,6 @@
   const startObserver = () => {
     if (observer) return;
     observer = new MutationObserver((mutations) => {
-      if (!isOpen) return;
       if (shouldRefreshFromMutations(mutations)) scheduleRefresh();
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -1388,6 +1715,7 @@
   startObserver();
 
   refreshBtn.addEventListener("click", refreshAll);
+  refreshAll();
 
   let frameReportTimer = null;
   let frameReportDebounce = null;
@@ -1400,7 +1728,8 @@
 
   reportLocalLecturesNow();
   frameReportTimer = setInterval(reportLocalLecturesNow, isTopWindow ? 5000 : 3000);
-  frameReportObserver = new MutationObserver(() => {
+  frameReportObserver = new MutationObserver((mutations) => {
+    if (!shouldRefreshFromMutations(mutations)) return;
     if (frameReportDebounce) return;
     frameReportDebounce = setTimeout(() => {
       frameReportDebounce = null;

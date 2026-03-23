@@ -1,8 +1,8 @@
 ﻿{
   "manifest_version": 3,
   "name": "东南大学讲座预约",
-  "version": "0.1.0",
-  "description": "东南大学讲座预约：定时自动预约并支持验证码识别。",
+  "version": "0.2.0",
+  "description": "东南大学讲座预约：页面内一键提前预约，侧边栏查看任务，支持验证码识别。",
   "permissions": [
     "storage",
     "alarms",
