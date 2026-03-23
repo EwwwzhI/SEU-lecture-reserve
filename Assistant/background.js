@@ -364,6 +364,9 @@ function delayWithJitter(baseMs, jitterMs) {
 
 let settings = {};
 let settingsReady = null;
+const TASK_ALARM_PREFIX = "task:";
+const TASK_CLEANUP_ALARM = "cleanup:tasks";
+const TASK_CLEANUP_GRACE_MS = 5000;
 
 async function getSettings() {
   const data = await chrome.storage.local.get(DEFAULT_SETTINGS);
@@ -398,6 +401,55 @@ async function saveTasksMap(tasks) {
   await chrome.storage.local.set({ tasks });
 }
 
+function getTaskAlarmName(id) {
+  return `${TASK_ALARM_PREFIX}${id}`;
+}
+
+function getTaskCleanupDeadline(task) {
+  const scheduledAt = Number(task && task.scheduledAt);
+  if (!Number.isFinite(scheduledAt) || scheduledAt <= 0) return null;
+  const nextDay = new Date(scheduledAt);
+  nextDay.setHours(24, 0, 0, 0);
+  return nextDay.getTime();
+}
+
+function isTaskExpiredForCleanup(task, now = Date.now()) {
+  const deadline = getTaskCleanupDeadline(task);
+  return Number.isFinite(deadline) && now >= deadline;
+}
+
+function getNextCleanupAlarmTime(now = Date.now()) {
+  const nextMidnight = new Date(now);
+  nextMidnight.setHours(24, 0, 0, 0);
+  return nextMidnight.getTime() + TASK_CLEANUP_GRACE_MS;
+}
+
+async function clearTaskAlarm(id) {
+  await chrome.alarms.clear(getTaskAlarmName(id));
+}
+
+async function ensureCleanupAlarm(now = Date.now()) {
+  chrome.alarms.create(TASK_CLEANUP_ALARM, { when: getNextCleanupAlarmTime(now) });
+}
+
+async function pruneExpiredTasks(now = Date.now(), existingTasks = null) {
+  const tasks = existingTasks || await getTasksMap();
+  let changed = false;
+
+  for (const [id, task] of Object.entries(tasks)) {
+    if (!isTaskExpiredForCleanup(task, now)) continue;
+    await clearTaskAlarm(id);
+    delete tasks[id];
+    changed = true;
+  }
+
+  if (changed) {
+    await saveTasksMap(tasks);
+  }
+
+  return tasks;
+}
+
 async function updateTask(id, patch) {
   const tasks = await getTasksMap();
   const existing = tasks[id];
@@ -408,15 +460,16 @@ async function updateTask(id, patch) {
 }
 
 async function createTask(task) {
-  const tasks = await getTasksMap();
+  const tasks = await pruneExpiredTasks(Date.now(), await getTasksMap());
   tasks[task.id] = task;
   await saveTasksMap(tasks);
+  await ensureCleanupAlarm();
   await scheduleTask(task);
   return task;
 }
 
 async function removeTask(id) {
-  await chrome.alarms.clear(`task:${id}`);
+  await clearTaskAlarm(id);
   const tasks = await getTasksMap();
   if (tasks[id]) {
     delete tasks[id];
@@ -428,15 +481,16 @@ async function removeTask(id) {
 async function scheduleTask(task) {
   if (!task || !task.scheduledAt) return;
   if (task.scheduledAt <= Date.now()) {
-    chrome.alarms.create(`task:${task.id}`, { when: Date.now() + 500 });
+    chrome.alarms.create(getTaskAlarmName(task.id), { when: Date.now() + 500 });
     return;
   }
-  chrome.alarms.create(`task:${task.id}`, { when: task.scheduledAt });
+  chrome.alarms.create(getTaskAlarmName(task.id), { when: task.scheduledAt });
 }
 
 async function rebuildAlarms() {
-  const tasks = await getTasksMap();
+  const tasks = await pruneExpiredTasks(Date.now(), await getTasksMap());
   const now = Date.now();
+  await ensureCleanupAlarm(now);
   for (const task of Object.values(tasks)) {
     if (task.status !== "scheduled") continue;
     if (task.scheduledAt && task.scheduledAt > now) {
@@ -727,13 +781,24 @@ async function runTask(taskId) {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (!alarm || !alarm.name || !alarm.name.startsWith("task:")) return;
-  const id = alarm.name.slice("task:".length);
+  if (!alarm || !alarm.name) return;
+  if (alarm.name === TASK_CLEANUP_ALARM) {
+    pruneExpiredTasks(Date.now())
+      .then(() => ensureCleanupAlarm())
+      .catch((err) => console.warn("[Background] Cleanup alarm error:", err));
+    return;
+  }
+  if (!alarm.name.startsWith(TASK_ALARM_PREFIX)) return;
+  const id = alarm.name.slice(TASK_ALARM_PREFIX.length);
   runTask(id);
 });
 
-chrome.runtime.onInstalled.addListener(() => rebuildAlarms());
-chrome.runtime.onStartup.addListener(() => rebuildAlarms());
+chrome.runtime.onInstalled.addListener(() => {
+  rebuildAlarms().catch((err) => console.warn("[Background] Rebuild alarms on install failed:", err));
+});
+chrome.runtime.onStartup.addListener(() => {
+  rebuildAlarms().catch((err) => console.warn("[Background] Rebuild alarms on startup failed:", err));
+});
 if (chrome.tabs && chrome.tabs.onRemoved) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     delete detectedLecturesByTab[tabId];
@@ -798,7 +863,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "listTasks") {
-      const tasks = await getTasksMap();
+      const tasks = await pruneExpiredTasks();
+      await ensureCleanupAlarm();
       sendResponse({ ok: true, tasks: Object.values(tasks) });
       return;
     }
@@ -831,13 +897,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "runTaskNow") {
-      const tasks = await getTasksMap();
+      const tasks = await pruneExpiredTasks();
       const task = tasks[msg.id];
       if (!task) {
         sendResponse({ ok: false, error: "not_found" });
         return;
       }
       await updateTask(task.id, { status: "scheduled", scheduledAt: Date.now() + 500 });
+      await ensureCleanupAlarm();
       await scheduleTask({ ...task, scheduledAt: Date.now() + 500 });
       sendResponse({ ok: true });
       return;
